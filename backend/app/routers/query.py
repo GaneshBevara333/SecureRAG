@@ -1,9 +1,10 @@
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.rag.answer import generate_rag_answer
+from app.auth.deps import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -32,14 +33,14 @@ class QueryResponse(BaseModel):
 @router.post("", response_model=QueryResponse)
 def run_query(
     payload: QueryRequest,
-    x_org_id: Optional[str] = Header(None),
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Answer question over documents with source citations."""
+    """Answer question over documents scoped to user's organization."""
     result = generate_rag_answer(
         db=db,
         question=payload.question,
-        org_id=x_org_id,
+        org_id=current_user.org_id,
     )
     return QueryResponse(
         answer=result["answer"],

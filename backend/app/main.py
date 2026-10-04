@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import documents, query
+from app.routers import auth, orgs, teams, documents, query
 
 app = FastAPI(
     title="SecureRAG API",
@@ -25,5 +25,8 @@ def health_check():
 
 
 # Include API routers
+app.include_router(auth.router)
+app.include_router(orgs.router)
+app.include_router(teams.router)
 app.include_router(documents.router)
 app.include_router(query.router)

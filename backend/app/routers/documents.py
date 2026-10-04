@@ -1,38 +1,12 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, Header
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.db.models import Document, Chunk, Organization, User
+from app.db.models import Document, Team
 from app.ingestion.pipeline import ingest_document
+from app.auth.deps import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-
-
-def get_default_org_and_user(db: Session, x_org_id: Optional[str] = None, x_user_id: Optional[str] = None):
-    """Ensure a default organization and user exist for Phase 1 ingestion."""
-    if x_org_id and x_user_id:
-        return x_org_id, x_user_id
-
-    # Find or create a default demo org and user
-    org = db.query(Organization).first()
-    if not org:
-        org = Organization(name="Default Org")
-        db.add(org)
-        db.flush()
-
-    user = db.query(User).filter(User.org_id == org.id).first()
-    if not user:
-        user = User(
-            org_id=org.id,
-            email="admin@default.local",
-            password_hash="mockhash",
-            role="admin",
-        )
-        db.add(user)
-        db.flush()
-
-    db.commit()
-    return org.id, user.id
 
 
 @router.post("")
@@ -41,24 +15,41 @@ async def upload_document(
     title: Optional[str] = Form(None),
     visibility: str = Form("private"),
     team_id: Optional[str] = Form(None),
-    x_org_id: Optional[str] = Header(None),
-    x_user_id: Optional[str] = Header(None),
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a PDF, Markdown, or Text document for ingestion."""
+    """Upload a document; securely associated with the authenticated user and organization."""
+    if visibility not in ("private", "team", "org"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Visibility must be 'private', 'team', or 'org'",
+        )
+
+    if team_id:
+        team = db.query(Team).filter(
+            Team.id == team_id,
+            Team.org_id == current_user.org_id,
+        ).first()
+        if not team:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Team does not exist in your organization",
+            )
+
     filename = file.filename or "uploaded_file.txt"
     content = await file.read()
 
     if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    org_id, user_id = get_default_org_and_user(db, x_org_id, x_user_id)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty.",
+        )
 
     try:
         doc = ingest_document(
             db=db,
-            org_id=org_id,
-            owner_id=user_id,
+            org_id=current_user.org_id,
+            owner_id=current_user.id,
             filename=filename,
             file_bytes=content,
             title=title,
@@ -75,19 +66,19 @@ async def upload_document(
             "chunk_count": len(doc.chunks),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ingestion failed: {str(e)}",
+        )
 
 
 @router.get("")
 def list_documents(
-    x_org_id: Optional[str] = Header(None),
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List documents."""
-    query = db.query(Document)
-    if x_org_id:
-        query = query.filter(Document.org_id == x_org_id)
-    docs = query.all()
+    """List documents belonging to the authenticated user's organization."""
+    docs = db.query(Document).filter(Document.org_id == current_user.org_id).all()
     return [
         {
             "id": d.id,
@@ -105,12 +96,17 @@ def list_documents(
 @router.get("/{document_id}")
 def get_document(
     document_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Retrieve document details by ID."""
-    doc = db.query(Document).filter(Document.id == document_id).first()
+    """Retrieve document details by ID. Returns 404 for inaccessible documents."""
+    doc = db.query(Document).filter(
+        Document.id == document_id,
+        Document.org_id == current_user.org_id,
+    ).first()
+
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
     return {
         "id": doc.id,
@@ -135,12 +131,21 @@ def get_document(
 @router.delete("/{document_id}")
 def delete_document(
     document_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a document and all its chunks."""
-    doc = db.query(Document).filter(Document.id == document_id).first()
+    """Delete a document. Only owner or admin may delete; returns 404 if inaccessible."""
+    doc = db.query(Document).filter(
+        Document.id == document_id,
+        Document.org_id == current_user.org_id,
+    ).first()
+
     if not doc:
-        raise HTTPException(status_code=404, detail="Document not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    # Only owner or admin may delete
+    if doc.owner_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
     db.delete(doc)
     db.commit()

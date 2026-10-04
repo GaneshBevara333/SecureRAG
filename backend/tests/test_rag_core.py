@@ -45,12 +45,22 @@ def test_rag_answer_with_citations(db_session):
 
 
 def test_document_api_flow(client):
+    # 0. Register user to get JWT token
+    reg_resp = client.post(
+        "/auth/register",
+        json={"org_name": "Acme Inc", "email": "admin@acme.local", "password": "password123"},
+    )
+    assert reg_resp.status_code == 201
+    token = reg_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
     # 1. Upload document
     file_bytes = b"Security policies require all employees to use multi-factor authentication."
     response = client.post(
         "/documents",
         files={"file": ("security_policy.txt", io.BytesIO(file_bytes), "text/plain")},
         data={"title": "Security Policy", "visibility": "org"},
+        headers=headers,
     )
     assert response.status_code == 200
     data = response.json()
@@ -59,13 +69,13 @@ def test_document_api_flow(client):
     assert data["chunk_count"] >= 1
 
     # 2. List documents
-    list_resp = client.get("/documents")
+    list_resp = client.get("/documents", headers=headers)
     assert list_resp.status_code == 200
     docs = list_resp.json()
     assert any(d["id"] == doc_id for d in docs)
 
     # 3. Get document details
-    get_resp = client.get(f"/documents/{doc_id}")
+    get_resp = client.get(f"/documents/{doc_id}", headers=headers)
     assert get_resp.status_code == 200
     doc_detail = get_resp.json()
     assert len(doc_detail["chunks"]) >= 1
@@ -74,6 +84,7 @@ def test_document_api_flow(client):
     query_resp = client.post(
         "/query",
         json={"question": "What authentication is required?", "mode": "standard"},
+        headers=headers,
     )
     assert query_resp.status_code == 200
     q_data = query_resp.json()
@@ -82,9 +93,9 @@ def test_document_api_flow(client):
     assert q_data["citations"][0]["document_id"] == doc_id
 
     # 5. Delete document
-    del_resp = client.delete(f"/documents/{doc_id}")
+    del_resp = client.delete(f"/documents/{doc_id}", headers=headers)
     assert del_resp.status_code == 200
 
     # 6. Verify 404 after deletion
-    get_after_del = client.get(f"/documents/{doc_id}")
+    get_after_del = client.get(f"/documents/{doc_id}", headers=headers)
     assert get_after_del.status_code == 404
