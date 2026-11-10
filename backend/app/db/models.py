@@ -70,6 +70,7 @@ class Organization(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     name = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    corpus_version = Column(Integer, default=1, nullable=False)
 
     users = relationship("User", back_populates="organization", cascade="all, delete-orphan")
     teams = relationship("Team", back_populates="organization", cascade="all, delete-orphan")

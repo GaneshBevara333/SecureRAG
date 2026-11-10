@@ -7,31 +7,87 @@ from app.config import get_settings
 
 
 class StubChatModel(BaseChatModel):
-    """Stub LLM model used for unit tests or when no external API key is provided."""
+    provider_name: str = "stub"
 
     def _generate(self, messages: list[BaseMessage], stop: Optional[list[str]] = None, **kwargs: Any) -> ChatResult:
-        # Simple heuristic response generator for testing
         prompt_text = " ".join([m.content for m in messages if isinstance(m.content, str)])
-        
-        # If question not in context
+
         if "Context:\nNo relevant documents found." in prompt_text:
             text = "not found in your documents"
-        elif "Context:" in prompt_text:
-            # Extract citation or answer from context
-            text = "Based on the provided documents: here is the retrieved answer. [Doc: sample.txt, Page: 1, Chunk: 0]"
+        elif "Context:" in prompt_text and "Question:" in prompt_text:
+            parts = prompt_text.split("Question:")
+            context_part = parts[0].split("Context:")[1].lower() if "Context:" in parts[0] else ""
+            q_part = parts[1].split("Answer:")[0].strip().lower()
+            
+            # Words with length > 3 from the question
+            keywords = [w.strip("?.,!;:\"'") for w in q_part.split() if len(w.strip("?.,!;:\"'")) > 3]
+            
+            # If question has keywords and none are found in the retrieved context
+            if keywords and not any(k in context_part for k in keywords):
+                text = "not found in your documents"
+            else:
+                text = "Based on the provided documents: here is the retrieved answer."
         else:
             text = "not found in your documents"
 
-        generation = ChatGeneration(message=AIMessage(content=text))
+        p_tokens = max(1, len(prompt_text) // 4)
+        c_tokens = max(1, len(text) // 4)
+        msg = AIMessage(
+            content=text,
+            usage_metadata={
+                "input_tokens": p_tokens,
+                "output_tokens": c_tokens,
+                "total_tokens": p_tokens + c_tokens,
+            },
+            response_metadata={
+                "provider": self.provider_name,
+                "model_name": f"{self.provider_name}-model",
+            },
+        )
+        generation = ChatGeneration(message=msg)
         return ChatResult(generations=[generation])
 
     @property
     def _llm_type(self) -> str:
-        return "stub-chat-model"
+        return self.provider_name
 
 
-def get_llm():
-    """Return configured Chat model (Groq with Gemini fallback, or stub if no key)."""
+def determine_provider(response: Any, llm: Any = None) -> str:
+    """Determine which provider generated the response (groq, gemini, or stub)."""
+    if hasattr(response, "response_metadata") and response.response_metadata:
+        meta = response.response_metadata
+        if "provider" in meta:
+            return str(meta["provider"]).lower()
+        model_str = str(meta.get("model_name") or meta.get("model") or "").lower()
+        if "gemini" in model_str or "google" in model_str:
+            return "gemini"
+        if "groq" in model_str or "llama" in model_str:
+            return "groq"
+
+    if llm is not None:
+        llm_type = getattr(llm, "_llm_type", "")
+        if "gemini" in llm_type.lower() or "google" in llm_type.lower():
+            return "gemini"
+        if "groq" in llm_type.lower():
+            return "groq"
+        if "stub" in llm_type.lower():
+            return "stub"
+
+    return "groq"
+
+
+def get_llm(primary_override: Any = None, fallback_override: Any = None):
+    """
+    Return configured Chat model (Groq with Gemini fallback, or stub if no key).
+    Accepts primary_override and fallback_override for dependency injection in tests.
+    """
+    if primary_override is not None and fallback_override is not None:
+        return primary_override.with_fallbacks([fallback_override])
+    elif primary_override is not None:
+        return primary_override
+    elif fallback_override is not None:
+        return fallback_override
+
     settings = get_settings()
 
     primary_model = None

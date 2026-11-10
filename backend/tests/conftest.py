@@ -4,12 +4,25 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
-# Use mock embeddings in unit tests for fast, deterministic execution
+# Ensure test environment variables are set BEFORE any app module imports
 os.environ["USE_MOCK_EMBEDDINGS"] = "1"
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["GROQ_API_KEY"] = ""
+os.environ["GEMINI_API_KEY"] = ""
+
+from app.config import get_settings
+get_settings.cache_clear()
 
 from app.db.session import Base, get_db
 from app.main import app
+from app.llm import providers
+from app.llm.providers import StubChatModel
+from app.retrieval.embed import default_embedding_service
+from app.retrieval.rerank import default_reranker_service
+
+# Ensure mock services are loaded and active for tests
+default_embedding_service.use_mock = True
+default_reranker_service.use_mock = True
 
 from sqlalchemy.pool import StaticPool
 
@@ -20,6 +33,13 @@ test_engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+
+@pytest.fixture(autouse=True)
+def mock_llm_providers_by_default(monkeypatch):
+    """Ensure all tests default to StubChatModel (zero real Groq/Gemini network calls)."""
+    stub = StubChatModel()
+    monkeypatch.setattr(providers, "get_llm", lambda *args, **kwargs: stub)
 
 
 @pytest.fixture(scope="function")

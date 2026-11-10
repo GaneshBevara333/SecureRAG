@@ -5,6 +5,8 @@ from app.db.session import get_db
 from app.db.models import Document, Team
 from app.ingestion.pipeline import ingest_document
 from app.auth.deps import get_current_user, CurrentUser
+from app.retrieval.acl import build_acl_condition
+from app.llm.cache import bump_corpus_version
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -18,11 +20,20 @@ async def upload_document(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a document; securely associated with the authenticated user and organization."""
+    """
+    Upload a document with visibility and team permissions.
+    If team_id is provided, user must be a member of that team.
+    """
     if visibility not in ("private", "team", "org"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Visibility must be 'private', 'team', or 'org'",
+        )
+
+    if visibility == "team" and not team_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="team_id is required when visibility is 'team'",
         )
 
     if team_id:
@@ -34,6 +45,12 @@ async def upload_document(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Team does not exist in your organization",
+            )
+
+        if team_id not in current_user.team_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User is not a member of the specified team",
             )
 
     filename = file.filename or "uploaded_file.txt"
@@ -56,11 +73,13 @@ async def upload_document(
             visibility=visibility,
             team_id=team_id,
         )
+        bump_corpus_version(db, current_user.org_id)
         return {
             "id": doc.id,
             "title": doc.title,
             "filename": doc.filename,
             "visibility": doc.visibility,
+            "team_id": doc.team_id,
             "status": doc.status,
             "version": doc.version,
             "chunk_count": len(doc.chunks),
@@ -77,14 +96,21 @@ def list_documents(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List documents belonging to the authenticated user's organization."""
-    docs = db.query(Document).filter(Document.org_id == current_user.org_id).all()
+    """List only documents that the user is permitted to view under ACL rules."""
+    acl_filter = build_acl_condition(
+        user_id=current_user.id,
+        org_id=current_user.org_id,
+        is_admin=(current_user.role == "admin"),
+        team_ids=current_user.team_ids,
+    )
+    docs = db.query(Document).filter(acl_filter).all()
     return [
         {
             "id": d.id,
             "title": d.title,
             "filename": d.filename,
             "visibility": d.visibility,
+            "team_id": d.team_id,
             "status": d.status,
             "version": d.version,
             "created_at": d.created_at.isoformat(),
@@ -99,10 +125,16 @@ def get_document(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Retrieve document details by ID. Returns 404 for inaccessible documents."""
+    """Retrieve document details. Returns 404 (never 403) for inaccessible documents."""
+    acl_filter = build_acl_condition(
+        user_id=current_user.id,
+        org_id=current_user.org_id,
+        is_admin=(current_user.role == "admin"),
+        team_ids=current_user.team_ids,
+    )
     doc = db.query(Document).filter(
         Document.id == document_id,
-        Document.org_id == current_user.org_id,
+        acl_filter,
     ).first()
 
     if not doc:
@@ -113,6 +145,7 @@ def get_document(
         "title": doc.title,
         "filename": doc.filename,
         "visibility": doc.visibility,
+        "team_id": doc.team_id,
         "status": doc.status,
         "version": doc.version,
         "created_at": doc.created_at.isoformat(),
@@ -134,10 +167,16 @@ def delete_document(
     current_user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a document. Only owner or admin may delete; returns 404 if inaccessible."""
+    """Delete a document. Returns 404 for inaccessible documents."""
+    acl_filter = build_acl_condition(
+        user_id=current_user.id,
+        org_id=current_user.org_id,
+        is_admin=(current_user.role == "admin"),
+        team_ids=current_user.team_ids,
+    )
     doc = db.query(Document).filter(
         Document.id == document_id,
-        Document.org_id == current_user.org_id,
+        acl_filter,
     ).first()
 
     if not doc:
@@ -149,4 +188,5 @@ def delete_document(
 
     db.delete(doc)
     db.commit()
+    bump_corpus_version(db, current_user.org_id)
     return {"message": "Document deleted successfully", "id": document_id}

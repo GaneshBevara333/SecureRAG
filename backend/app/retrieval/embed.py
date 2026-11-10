@@ -33,10 +33,17 @@ def _pseudo_embedding(text: str, dim: int = 384) -> List[float]:
 
 class EmbeddingService:
     def __init__(self, use_mock: Optional[bool] = None):
-        if use_mock is not None:
-            self.use_mock = use_mock
-        else:
-            self.use_mock = os.getenv("USE_MOCK_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
+        self._custom_mock = use_mock
+
+    @property
+    def use_mock(self) -> bool:
+        if self._custom_mock is not None:
+            return self._custom_mock
+        return os.getenv("USE_MOCK_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
+
+    @use_mock.setter
+    def use_mock(self, val: bool) -> None:
+        self._custom_mock = val
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not texts:
